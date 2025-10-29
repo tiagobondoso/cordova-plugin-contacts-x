@@ -28,6 +28,7 @@
 		<source-file src="src/android/ContactsXFindOptions.java" target-dir="src/de/einfachhans/ContactsX" />
 	</platform>
 	<platform name="ios">
+		<preference name="SwiftVersion" value="5" />
 		<config-file parent="/*" target="config.xml">
 			<feature name="ContactsX">
 				<param name="ios-package" value="ContactsX" />
