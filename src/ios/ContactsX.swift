@@ -77,11 +77,10 @@ import PhoneNumberKit
     func pick(command: CDVInvokedUrlCommand) {
         _callbackId = command.callbackId;
 
-        self.hasPermission { (granted) in
-            guard granted else {
-                self.returnError(error: ErrorCodes.PermissionDenied);
-                return;
-            }
+        // CNContactPickerViewController is a sandboxed system UI — it does NOT
+        // require contacts permission. Present it directly on the main thread
+        // (all UIKit work must happen on the main thread).
+        DispatchQueue.main.async {
             let contactPicker = CNContactPickerViewController();
             contactPicker.delegate = self;
             self.viewController.present(contactPicker, animated: true, completion: nil)
@@ -91,12 +90,20 @@ import PhoneNumberKit
     func contactPicker(_ picker: CNContactPickerViewController, didSelect contact: CNContact) {
         let fields: NSDictionary = [
             "phoneNumbers": true,
-            "emails": true
+            "emails": true,
+            "firstName": true,
+            "familyName": true,
+            "middleName": true,
+            "organizationName": true
         ];
         let options = ContactsXOptions(options: ["fields": fields]);
         let contactResult = ContactX(contact: contact, options: options).getJson() as! [String : Any];
         let result: CDVPluginResult = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: contactResult);
         self.commandDelegate.send(result, callbackId: self._callbackId);
+    }
+
+    func contactPickerDidCancel(_ picker: CNContactPickerViewController) {
+        self.returnError(error: ErrorCodes.PermissionDenied, message: "User cancelled contact picker");
     }
 
     @objc(save:)
