@@ -5,7 +5,7 @@ import PhoneNumberKit
 @objc(ContactsX) class ContactsX : CDVPlugin, CNContactPickerDelegate {
 
     var _callbackId: String?
-    static var _PhoneNumberKitInstance: PhoneNumberKit? = nil;
+    static var _PhoneNumberKitInstance: PhoneNumberUtility? = nil;
 
     @objc(pluginInitialize)
     override func pluginInitialize() {
@@ -330,7 +330,7 @@ import PhoneNumberKit
     func hasPermission(completionHandler: @escaping (_ accessGranted: Bool) -> Void, requestIfNotAvailable: Bool = false) {
         let store = CNContactStore();
         switch CNContactStore.authorizationStatus(for: .contacts) {
-                case .authorized:
+                case .authorized, .limited:
                     completionHandler(true)
                 case .denied:
                     completionHandler(false)
@@ -348,6 +348,8 @@ import PhoneNumberKit
                     } else {
                         completionHandler(false)
                     }
+                @unknown default:
+                    completionHandler(false)
                 }
     }
 
@@ -389,9 +391,9 @@ import PhoneNumberKit
         }
     }
     
-    static func getPhoneNumberKitInstance() -> PhoneNumberKit {
+    static func getPhoneNumberKitInstance() -> PhoneNumberUtility {
         if(ContactsX._PhoneNumberKitInstance == nil){
-            ContactsX._PhoneNumberKitInstance = PhoneNumberKit();
+            ContactsX._PhoneNumberKitInstance = PhoneNumberUtility();
         }
         return ContactsX._PhoneNumberKitInstance!;
     }

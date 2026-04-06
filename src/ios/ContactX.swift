@@ -72,7 +72,7 @@ class ContactX {
             do {
                 let phoneNumberCustomDefaultRegion = try ContactsX.getPhoneNumberKitInstance().parse(phoneNumberString, withRegion: self.options.baseCountryCode!!, ignoreType: true);
                 
-                return ContactsX.getPhoneNumberKitInstance().format(phoneNumberCustomDefaultRegion, toType : .e164);
+                return ContactsX.getPhoneNumberKitInstance().format(phoneNumberCustomDefaultRegion, toType: .e164);
             }
             catch {
                 return "";

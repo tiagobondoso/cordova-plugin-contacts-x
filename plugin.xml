@@ -43,7 +43,7 @@
 				<source url="https://github.com/CocoaPods/Specs.git" />
 			</config>
 			<pods use-frameworks="true">
-				<pod name="PhoneNumberKit" spec="~> 3.3" />
+				<pod name="PhoneNumberKit" spec="~> 4.0" />
 			</pods>
 		</podspec>
 		<config-file target="*-Info.plist" parent="NSContactsUsageDescription">
@@ -52,6 +52,5 @@
 			</string>
 		</config-file>
 		
-        <dependency id="cordova-plugin-add-swift-support" version="2.0.2" />
 	</platform>
 </plugin>
