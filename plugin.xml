@@ -8,7 +8,7 @@
 
     <license>MIT</license>
 	<js-module name="ContactsX" src="www/contactsX.js">
-		<clobbers target="window.ContactsX" />
+		<clobbers target="cordova.plugins.contacts" />
 	</js-module>
 	<platform name="android">
 		<config-file parent="/*" target="res/xml/config.xml">
