@@ -125,7 +125,7 @@ public class ContactsX extends CordovaPlugin {
                         idCursor.close();
                         LOG.d(LOG_TAG, "pick resolved contactId=" + contactId);
 
-                        JSONObject contact = buildContactFromId(contactId);
+                        JSONObject contact = buildContactFromPickerUri(contactUri, contactId);
                         if (contact != null) {
                             LOG.d(LOG_TAG, "pick success contact=" + contact.toString());
                             // Send as a serialised JSON string so the JS layer
@@ -395,6 +395,133 @@ public class ContactsX extends CordovaPlugin {
         }
 
         return null;
+    }
+
+    /**
+     * Builds a contact JSONObject using the URI returned by the system picker.
+     * The picker URI carries a temporary OS permission grant that covers reading
+     * this contact's data — no READ_CONTACTS permission needed.
+     * Output structure matches iOS exactly:
+     * { id, displayName, firstName, middleName, familyName, organizationName,
+     *   phoneNumbers: [{id, type, value, normalized}],
+     *   emails: [{id, type, value}] }
+     */
+    private JSONObject buildContactFromPickerUri(Uri pickerUri, String contactId) throws JSONException {
+        ContentResolver cr = this.cordova.getActivity().getContentResolver();
+
+        JSONObject result = new JSONObject();
+        result.put("id", contactId);
+        result.put("displayName", "");
+        result.put("firstName", "");
+        result.put("middleName", "");
+        result.put("familyName", "");
+        result.put("organizationName", "");
+        result.put("phoneNumbers", new JSONArray());
+        result.put("emails", new JSONArray());
+
+        // 1. Read displayName directly from the picker URI (always permitted)
+        Cursor contactCursor = cr.query(
+                pickerUri,
+                new String[]{
+                        ContactsContract.Contacts.DISPLAY_NAME
+                },
+                null, null, null);
+        if (contactCursor != null) {
+            if (contactCursor.moveToFirst()) {
+                int idx = contactCursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME);
+                if (idx >= 0) result.put("displayName", nullSafeString(contactCursor, idx));
+            }
+            contactCursor.close();
+        }
+
+        // Build the Data URI scoped to this specific contact using the lookup path.
+        // e.g. content://com.android.contacts/contacts/lookup/<key>/<id>/data
+        // This URI inherits the same temporary permission the picker granted.
+        Uri dataUri = Uri.withAppendedPath(pickerUri, ContactsContract.Contacts.Data.CONTENT_DIRECTORY);
+
+        // 2. Structured name
+        Cursor structuredCursor = cr.query(
+                dataUri,
+                new String[]{
+                        ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME,
+                        ContactsContract.CommonDataKinds.StructuredName.MIDDLE_NAME,
+                        ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME
+                },
+                ContactsContract.Data.MIMETYPE + " = ?",
+                new String[]{ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE},
+                null);
+        if (structuredCursor != null) {
+            if (structuredCursor.moveToFirst()) {
+                int givenIdx  = structuredCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME);
+                int middleIdx = structuredCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.MIDDLE_NAME);
+                int familyIdx = structuredCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME);
+                if (givenIdx  >= 0) result.put("firstName",  nullSafeString(structuredCursor, givenIdx));
+                if (middleIdx >= 0) result.put("middleName", nullSafeString(structuredCursor, middleIdx));
+                if (familyIdx >= 0) result.put("familyName", nullSafeString(structuredCursor, familyIdx));
+            }
+            structuredCursor.close();
+        }
+
+        // 3. Organisation
+        Cursor orgCursor = cr.query(
+                dataUri,
+                new String[]{ContactsContract.CommonDataKinds.Organization.COMPANY},
+                ContactsContract.Data.MIMETYPE + " = ?",
+                new String[]{ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE},
+                null);
+        if (orgCursor != null) {
+            if (orgCursor.moveToFirst()) {
+                int orgIdx = orgCursor.getColumnIndex(ContactsContract.CommonDataKinds.Organization.COMPANY);
+                if (orgIdx >= 0) result.put("organizationName", nullSafeString(orgCursor, orgIdx));
+            }
+            orgCursor.close();
+        }
+
+        // 4. Phone numbers
+        Cursor phoneCursor = cr.query(
+                dataUri,
+                new String[]{
+                        ContactsContract.CommonDataKinds.Phone._ID,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER,
+                        ContactsContract.CommonDataKinds.Phone.TYPE,
+                        ContactsContract.CommonDataKinds.Phone.LABEL
+                },
+                ContactsContract.Data.MIMETYPE + " = ?",
+                new String[]{ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE},
+                null);
+        if (phoneCursor != null) {
+            JSONArray phones = new JSONArray();
+            ContactsXFindOptions emptyOptions = new ContactsXFindOptions(null);
+            while (phoneCursor.moveToNext()) {
+                phones.put(phoneQuery(phoneCursor, emptyOptions));
+            }
+            phoneCursor.close();
+            result.put("phoneNumbers", phones);
+        }
+
+        // 5. Emails
+        Cursor emailCursor = cr.query(
+                dataUri,
+                new String[]{
+                        ContactsContract.CommonDataKinds.Email._ID,
+                        ContactsContract.CommonDataKinds.Email.DATA,
+                        ContactsContract.CommonDataKinds.Email.TYPE,
+                        ContactsContract.CommonDataKinds.Email.LABEL
+                },
+                ContactsContract.Data.MIMETYPE + " = ?",
+                new String[]{ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE},
+                null);
+        if (emailCursor != null) {
+            JSONArray emails = new JSONArray();
+            while (emailCursor.moveToNext()) {
+                emails.put(emailQuery(emailCursor));
+            }
+            emailCursor.close();
+            result.put("emails", emails);
+        }
+
+        LOG.d(LOG_TAG, "buildContactFromPickerUri result=" + result.toString());
+        return result;
     }
 
     /**
@@ -898,10 +1025,9 @@ public class ContactsX extends CordovaPlugin {
 
     private void returnError(ContactsXErrorCodes errorCode, String message) {
         if (_callbackContext != null) {
-            Map<String, Object> resultMap = new HashMap<>();
-            resultMap.put("code", errorCode.value);
-            resultMap.put("message", message == null ? "" : message);
-            _callbackContext.error(new JSONObject(resultMap));
+            // Send as plain string so JS can display it directly without [object Object]
+            String errorMessage = "code:" + errorCode.value + "|message:" + (message == null ? "" : message);
+            _callbackContext.error(errorMessage);
             _callbackContext = null;
         }
     }
