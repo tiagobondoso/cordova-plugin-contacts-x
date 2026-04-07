@@ -63,11 +63,9 @@ public class ContactsX extends CordovaPlugin {
                     returnError(ContactsXErrorCodes.PermissionDenied);
                 }
             } else if (action.equals("pick")) {
-                if (PermissionHelper.hasPermission(this, READ)) {
-                    this.pick();
-                } else {
-                    returnError(ContactsXErrorCodes.PermissionDenied);
-                }
+                // ACTION_PICK uses the system contact picker UI — no READ_CONTACTS
+                // permission is needed, just like CNContactPickerViewController on iOS.
+                this.pick();
             } else if (action.equals("save")) {
                 if(PermissionHelper.hasPermission(this, WRITE)) {
                     this.save(args);
@@ -117,8 +115,9 @@ public class ContactsX extends CordovaPlugin {
                     returnError(ContactsXErrorCodes.UnknownError);
                 }
             } else {
-                returnError(ContactsXErrorCodes.UnknownError);
-
+                // User cancelled the picker — return PermissionDenied so the
+                // caller can distinguish a cancellation from a real error.
+                returnError(ContactsXErrorCodes.PermissionDenied, "User cancelled contact picker");
             }
         }
     }
@@ -329,7 +328,9 @@ public class ContactsX extends CordovaPlugin {
     }
 
     private void pick() {
-        this.cordova.getThreadPool().execute(() -> {
+        // startActivityForResult must be called on the main (UI) thread.
+        // Running it on the thread pool causes a silent no-op on Android.
+        this.cordova.getActivity().runOnUiThread(() -> {
             Intent contactPickerIntent = new Intent(Intent.ACTION_PICK, ContactsContract.Contacts.CONTENT_URI);
             this.cordova.startActivityForResult(this, contactPickerIntent, REQ_CODE_PICK);
         });
@@ -359,6 +360,10 @@ public class ContactsX extends CordovaPlugin {
         Map<String, Object> fields = new HashMap<>();
         fields.put("phoneNumbers", true);
         fields.put("emails", true);
+        fields.put("firstName", true);
+        fields.put("middleName", true);
+        fields.put("familyName", true);
+        fields.put("organizationName", true);
         Map<String, Object> pickFields = new HashMap<>();
         pickFields.put("fields", fields);
 
