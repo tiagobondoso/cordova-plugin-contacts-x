@@ -63,11 +63,9 @@ public class ContactsX extends CordovaPlugin {
                     returnError(ContactsXErrorCodes.PermissionDenied);
                 }
             } else if (action.equals("pick")) {
-                if (PermissionHelper.hasPermission(this, READ)) {
-                    this.pick();
-                } else {
-                    returnError(ContactsXErrorCodes.PermissionDenied);
-                }
+                // ACTION_PICK uses the system contact picker UI which does NOT
+                // require READ_CONTACTS permission — present it directly.
+                this.pick();
             } else if (action.equals("save")) {
                 if(PermissionHelper.hasPermission(this, WRITE)) {
                     this.save(args);
@@ -130,7 +128,9 @@ public class ContactsX extends CordovaPlugin {
                         JSONObject contact = buildContactFromId(contactId);
                         if (contact != null) {
                             LOG.d(LOG_TAG, "pick success contact=" + contact.toString());
-                            this._callbackContext.success(contact);
+                            // Send as a serialised JSON string so the JS layer
+                            // can JSON.parse it — consistent with iOS behaviour.
+                            this._callbackContext.success(contact.toString());
                         } else {
                             returnError(ContactsXErrorCodes.UnknownError, "Could not load contact data");
                         }
