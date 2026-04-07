@@ -63,9 +63,11 @@ public class ContactsX extends CordovaPlugin {
                     returnError(ContactsXErrorCodes.PermissionDenied);
                 }
             } else if (action.equals("pick")) {
-                // ACTION_PICK uses the system contact picker UI — no READ_CONTACTS
-                // permission is needed, just like CNContactPickerViewController on iOS.
-                this.pick();
+                if (PermissionHelper.hasPermission(this, READ)) {
+                    this.pick();
+                } else {
+                    returnError(ContactsXErrorCodes.PermissionDenied);
+                }
             } else if (action.equals("save")) {
                 if(PermissionHelper.hasPermission(this, WRITE)) {
                     this.save(args);
@@ -98,51 +100,25 @@ public class ContactsX extends CordovaPlugin {
     public void onActivityResult(int requestCode, int resultCode, final Intent intent) {
         if (requestCode == REQ_CODE_PICK) {
             if (resultCode == Activity.RESULT_OK) {
-                // Move all DB work off the main thread to avoid ANR crashes.
-                this.cordova.getThreadPool().execute(() -> {
-                    try {
-                        Uri contactUri = intent.getData();
-                        LOG.d(LOG_TAG, "pick onActivityResult URI=" + contactUri);
-                        if (contactUri == null) {
-                            returnError(ContactsXErrorCodes.UnknownError, "No contact URI returned");
-                            return;
-                        }
+                String contactId = intent.getData().getLastPathSegment();
+                Cursor c = this.cordova.getActivity().getContentResolver().query(ContactsContract.RawContacts.CONTENT_URI,
+                        new String[]{ContactsContract.RawContacts._ID}, ContactsContract.RawContacts.CONTACT_ID + " = " + contactId, null, null);
+                if (!c.moveToFirst()) {
+                    returnError(ContactsXErrorCodes.UnknownError, "Error occurred while retrieving contact raw id");
+                    return;
+                }
+                String id = c.getString(c.getColumnIndex(ContactsContract.RawContacts._ID));
+                c.close();
 
-                        // Resolve the CONTACT_ID directly from the URI the picker gave us.
-                        // The system grants temporary read access to this URI even without READ_CONTACTS.
-                        Cursor idCursor = this.cordova.getActivity().getContentResolver().query(
-                                contactUri,
-                                new String[]{ContactsContract.Contacts._ID},
-                                null, null, null);
-
-                        if (idCursor == null || !idCursor.moveToFirst()) {
-                            if (idCursor != null) idCursor.close();
-                            returnError(ContactsXErrorCodes.UnknownError, "Could not resolve contact from URI");
-                            return;
-                        }
-
-                        String contactId = idCursor.getString(idCursor.getColumnIndexOrThrow(ContactsContract.Contacts._ID));
-                        idCursor.close();
-                        LOG.d(LOG_TAG, "pick resolved contactId=" + contactId);
-
-                        JSONObject contact = buildContactFromId(contactId);
-                        if (contact != null) {
-                            LOG.d(LOG_TAG, "pick success contact=" + contact.toString());
-                            // Send as a JSON string so the JS layer can JSON.parse it
-                            // consistently across Android and iOS.
-                            this._callbackContext.success(contact.toString());
-                        } else {
-                            returnError(ContactsXErrorCodes.UnknownError, "Could not load contact data");
-                        }
-                    } catch (Exception e) {
-                        LOG.e(LOG_TAG, "pick onActivityResult exception: " + e.getMessage(), e);
-                        returnError(ContactsXErrorCodes.UnknownError, e.getMessage());
-                    }
-                });
+                JSONObject contact = getContactById(id);
+                if (contact != null) {
+                    this._callbackContext.success(contact);
+                } else {
+                    returnError(ContactsXErrorCodes.UnknownError);
+                }
             } else {
-                // User cancelled the picker — return PermissionDenied so the
-                // caller can distinguish a cancellation from a real error.
-                returnError(ContactsXErrorCodes.PermissionDenied, "User cancelled contact picker");
+                returnError(ContactsXErrorCodes.UnknownError);
+
             }
         }
     }
@@ -249,70 +225,71 @@ public class ContactsX extends CordovaPlugin {
             HashMap<Object, JSONObject> contactsById = new HashMap<>();
 
             while (contactsCursor.moveToNext()) {
-                int contactIdIdx = contactsCursor.getColumnIndex(ContactsContract.Data.CONTACT_ID);
-                int rawIdIdx = contactsCursor.getColumnIndex(ContactsContract.Data.RAW_CONTACT_ID);
-                if (contactIdIdx < 0 || rawIdIdx < 0) continue;
-
-                String contactId = contactsCursor.getString(contactIdIdx);
-                String rawId = contactsCursor.getString(rawIdIdx);
+                String contactId = contactsCursor.getString(
+                        contactsCursor.getColumnIndex(ContactsContract.Data.CONTACT_ID)
+                );
+                String rawId = contactsCursor.getString(
+                        contactsCursor.getColumnIndex(ContactsContract.Data.RAW_CONTACT_ID)
+                );
 
                 JSONObject jsContact = new JSONObject();
 
                 if (!contactsById.containsKey(contactId)) {
+                    // this contact does not yet exist in HashMap,
+                    // so put it to the HashMap
+
                     jsContact.put("id", contactId);
                     jsContact.put("rawId", rawId);
                     if (options.displayName) {
-                        int displayNameIdx = contactsCursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME);
-                        if (displayNameIdx >= 0) {
-                            jsContact.put("displayName", contactsCursor.getString(displayNameIdx));
-                        }
+                        String displayName = contactsCursor.getString(contactsCursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME));
+                        jsContact.put("displayName", displayName);
                     }
-                    jsContact.put("phoneNumbers", new JSONArray());
-                    jsContact.put("emails", new JSONArray());
+                    JSONArray jsPhoneNumbers = new JSONArray();
+                    jsContact.put("phoneNumbers", jsPhoneNumbers);
+
+                    JSONArray jsEmails = new JSONArray();
+                    jsContact.put("emails", jsEmails);
 
                     jsContacts.put(jsContact);
                 } else {
                     jsContact = contactsById.get(contactId);
                 }
 
-                int mimeTypeIdx = contactsCursor.getColumnIndex(ContactsContract.Data.MIMETYPE);
-                if (mimeTypeIdx < 0) continue;
-                String mimeType = contactsCursor.getString(mimeTypeIdx);
+                String mimeType = contactsCursor.getString(
+                        contactsCursor.getColumnIndex(ContactsContract.Data.MIMETYPE)
+                );
 
                 assert jsContact != null;
                 switch (mimeType) {
                     case ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE:
-                        try {
-                            JSONArray jsPhoneNumbers = jsContact.getJSONArray("phoneNumbers");
-                            jsPhoneNumbers.put(phoneQuery(contactsCursor, options));
-                        } catch (IllegalArgumentException ignored) {}
+                        JSONArray jsPhoneNumbers = jsContact.getJSONArray("phoneNumbers");
+                        jsPhoneNumbers.put(phoneQuery(contactsCursor, options));
                         break;
                     case ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE:
-                        try {
-                            JSONArray emailAddresses = jsContact.getJSONArray("emails");
-                            emailAddresses.put(emailQuery(contactsCursor));
-                        } catch (IllegalArgumentException ignored) {}
+                        JSONArray emailAddresses = jsContact.getJSONArray("emails");
+                        emailAddresses.put(emailQuery(contactsCursor));
                         break;
                     case ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE:
                         if (options.organizationName) {
-                            int orgIdx = contactsCursor.getColumnIndex(ContactsContract.CommonDataKinds.Organization.COMPANY);
-                            if (orgIdx >= 0) {
-                                jsContact.put("organizationName", contactsCursor.getString(orgIdx));
-                            }
+                            String organizationName = contactsCursor.getString(contactsCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Organization.COMPANY));
+                            jsContact.put("organizationName", organizationName);
                         }
-                        break;
+                        break;    
                     case ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE:
-                        if (options.firstName) {
-                            int idx = contactsCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME);
-                            if (idx >= 0) jsContact.put("firstName", contactsCursor.getString(idx));
-                        }
-                        if (options.middleName) {
-                            int idx = contactsCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.MIDDLE_NAME);
-                            if (idx >= 0) jsContact.put("middleName", contactsCursor.getString(idx));
-                        }
-                        if (options.familyName) {
-                            int idx = contactsCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME);
-                            if (idx >= 0) jsContact.put("familyName", contactsCursor.getString(idx));
+                        try {
+                            if (options.firstName) {
+                                String firstName = contactsCursor.getString(contactsCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME));
+                                jsContact.put("firstName", firstName);
+                            }
+                            if (options.middleName) {
+                                String middleName = contactsCursor.getString(contactsCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.StructuredName.MIDDLE_NAME));
+                                jsContact.put("middleName", middleName);
+                            }
+                            if (options.familyName) {
+                                String familyName = contactsCursor.getString(contactsCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME));
+                                jsContact.put("familyName", familyName);
+                            }
+                        } catch (IllegalArgumentException ignored) {
                         }
                         break;
                 }
@@ -328,41 +305,31 @@ public class ContactsX extends CordovaPlugin {
 
     private JSONObject phoneQuery(Cursor cursor, ContactsXFindOptions options) throws JSONException {
         JSONObject phoneNumber = new JSONObject();
-        int typeIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.TYPE);
-        int labelIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.LABEL);
-        int idIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone._ID);
-        int numberIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER);
-        int typeCode = typeIdx >= 0 ? cursor.getInt(typeIdx) : ContactsContract.CommonDataKinds.Phone.TYPE_OTHER;
-        String typeLabel = labelIdx >= 0 ? cursor.getString(labelIdx) : null;
+        int typeCode = cursor.getInt(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.TYPE));
+        String typeLabel = cursor.getString(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.LABEL));
         String type = (typeCode == ContactsContract.CommonDataKinds.Phone.TYPE_CUSTOM) ? typeLabel : getPhoneType(typeCode);
-        phoneNumber.put("id", idIdx >= 0 ? cursor.getString(idIdx) : "");
-        String numberValue = numberIdx >= 0 ? cursor.getString(numberIdx) : "";
-        phoneNumber.put("value", numberValue != null ? numberValue : "");
-        phoneNumber.put("normalized", getNormalizedPhoneNumber(numberValue, options));
-        phoneNumber.put("type", type != null ? type : "other");
+        phoneNumber.put("id", cursor.getString(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone._ID)));
+        phoneNumber.put("value", cursor.getString(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)));
+        phoneNumber.put("normalized", getNormalizedPhoneNumber(
+                                                cursor.getString(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)),
+                                                options));
+        phoneNumber.put("type", type);
         return phoneNumber;
     }
 
     private JSONObject emailQuery(Cursor cursor) throws JSONException {
         JSONObject email = new JSONObject();
-        int typeIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Email.TYPE);
-        int labelIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Email.LABEL);
-        int idIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Email._ID);
-        int dataIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Email.DATA);
-        int typeCode = typeIdx >= 0 ? cursor.getInt(typeIdx) : ContactsContract.CommonDataKinds.Email.TYPE_OTHER;
-        String typeLabel = labelIdx >= 0 ? cursor.getString(labelIdx) : null;
+        int typeCode = cursor.getInt(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.TYPE));
+        String typeLabel = cursor.getString(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.LABEL));
         String type = (typeCode == ContactsContract.CommonDataKinds.Email.TYPE_CUSTOM) ? typeLabel : getMailType(typeCode);
-        email.put("id", idIdx >= 0 ? cursor.getString(idIdx) : "");
-        String dataValue = dataIdx >= 0 ? cursor.getString(dataIdx) : "";
-        email.put("value", dataValue != null ? dataValue : "");
-        email.put("type", type != null ? type : "other");
+        email.put("id", cursor.getString(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email._ID)));
+        email.put("value", cursor.getString(cursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.DATA)));
+        email.put("type", type);
         return email;
     }
 
     private void pick() {
-        // startActivityForResult must be called on the main (UI) thread.
-        // Running it on the thread pool causes a silent no-op on Android.
-        this.cordova.getActivity().runOnUiThread(() -> {
+        this.cordova.getThreadPool().execute(() -> {
             Intent contactPickerIntent = new Intent(Intent.ACTION_PICK, ContactsContract.Contacts.CONTENT_URI);
             this.cordova.startActivityForResult(this, contactPickerIntent, REQ_CODE_PICK);
         });
@@ -381,50 +348,26 @@ public class ContactsX extends CordovaPlugin {
         return "";
     }
 
-    private JSONObject getContactById(String rawId) {
-        // Query only the MIME types we care about so every expected column is present.
-        // The selection has 1 placeholder for rawId + 4 for the MIME type IN clause = 5 total args.
-        String selection =
-                ContactsContract.Data.RAW_CONTACT_ID + " = ? AND " +
-                ContactsContract.Data.MIMETYPE + " IN (?, ?, ?, ?)";
-        String[] selectionArgs = new String[]{
-                rawId,
-                ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE,
-                ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE,
-                ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE,
-                ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE
-        };
-
-        LOG.d(LOG_TAG, "getContactById rawId=" + rawId + " selection=" + selection);
-
+    private JSONObject getContactById(String id) {
         Cursor c = this.cordova.getActivity().getContentResolver().query(
                 ContactsContract.Data.CONTENT_URI,
                 null,
-                selection,
-                selectionArgs,
+                ContactsContract.Data.RAW_CONTACT_ID + " = ? ",
+                new String[]{id},
                 ContactsContract.Data.RAW_CONTACT_ID + " ASC");
-
-        LOG.d(LOG_TAG, "getContactById cursor count=" + (c != null ? c.getCount() : "null"));
 
         Map<String, Object> fields = new HashMap<>();
         fields.put("phoneNumbers", true);
         fields.put("emails", true);
-        fields.put("firstName", true);
-        fields.put("middleName", true);
-        fields.put("familyName", true);
-        fields.put("organizationName", true);
-        fields.put("displayName", true);
         Map<String, Object> pickFields = new HashMap<>();
         pickFields.put("fields", fields);
 
         try {
             JSONArray contacts = handleFindResult(c, new ContactsXFindOptions(new JSONObject(pickFields)));
-            LOG.d(LOG_TAG, "getContactById handleFindResult length=" + contacts.length());
-            if (contacts.length() >= 1) {
+            if (contacts.length() == 1) {
                 return contacts.getJSONObject(0);
             }
         } catch (Exception e) {
-            LOG.e(LOG_TAG, "getContactById exception: " + e.getMessage(), e);
             returnError(ContactsXErrorCodes.UnknownError, e.getMessage());
         }
 

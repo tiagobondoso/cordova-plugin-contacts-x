@@ -13,14 +13,7 @@ var contactsX = {
   },
 
   pick: function (success, error) {
-    exec(function(result) {
-      // Android returns the contact as a JSON string; iOS returns a parsed object.
-      // Normalise to always deliver a parsed object to the caller.
-      if (typeof result === 'string') {
-        try { result = JSON.parse(result); } catch(e) { /* already an object */ }
-      }
-      success(result);
-    }, error, 'ContactsX', 'pick', []);
+    exec(success, error, 'ContactsX', 'pick', []);
   },
   
   save: function (contact, success, error) {
