@@ -102,6 +102,7 @@ public class ContactsX extends CordovaPlugin {
                 this.cordova.getThreadPool().execute(() -> {
                     try {
                         Uri contactUri = intent.getData();
+                        LOG.d(LOG_TAG, "pick onActivityResult URI=" + contactUri);
                         if (contactUri == null) {
                             returnError(ContactsXErrorCodes.UnknownError, "No contact URI returned");
                             return;
@@ -121,6 +122,7 @@ public class ContactsX extends CordovaPlugin {
 
                         String contactId = idCursor.getString(idCursor.getColumnIndexOrThrow(ContactsContract.Contacts._ID));
                         idCursor.close();
+                        LOG.d(LOG_TAG, "pick resolved contactId=" + contactId);
 
                         // Now get the first raw contact ID for that contact.
                         Cursor rawCursor = this.cordova.getActivity().getContentResolver().query(
@@ -137,14 +139,17 @@ public class ContactsX extends CordovaPlugin {
 
                         String rawId = rawCursor.getString(rawCursor.getColumnIndexOrThrow(ContactsContract.RawContacts._ID));
                         rawCursor.close();
+                        LOG.d(LOG_TAG, "pick resolved rawId=" + rawId);
 
                         JSONObject contact = getContactById(rawId);
                         if (contact != null) {
+                            LOG.d(LOG_TAG, "pick success contact=" + contact.toString());
                             this._callbackContext.success(contact);
                         } else {
                             returnError(ContactsXErrorCodes.UnknownError, "Could not load contact data");
                         }
                     } catch (Exception e) {
+                        LOG.e(LOG_TAG, "pick onActivityResult exception: " + e.getMessage(), e);
                         returnError(ContactsXErrorCodes.UnknownError, e.getMessage());
                     }
                 });
@@ -392,9 +397,10 @@ public class ContactsX extends CordovaPlugin {
 
     private JSONObject getContactById(String rawId) {
         // Query only the MIME types we care about so every expected column is present.
+        // The selection has 1 placeholder for rawId + 4 for the MIME type IN clause = 5 total args.
         String selection =
                 ContactsContract.Data.RAW_CONTACT_ID + " = ? AND " +
-                ContactsContract.Data.MIMETYPE + " IN (?,?,?,?)";
+                ContactsContract.Data.MIMETYPE + " IN (?, ?, ?, ?)";
         String[] selectionArgs = new String[]{
                 rawId,
                 ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE,
@@ -403,12 +409,16 @@ public class ContactsX extends CordovaPlugin {
                 ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE
         };
 
+        LOG.d(LOG_TAG, "getContactById rawId=" + rawId + " selection=" + selection);
+
         Cursor c = this.cordova.getActivity().getContentResolver().query(
                 ContactsContract.Data.CONTENT_URI,
                 null,
                 selection,
                 selectionArgs,
                 ContactsContract.Data.RAW_CONTACT_ID + " ASC");
+
+        LOG.d(LOG_TAG, "getContactById cursor count=" + (c != null ? c.getCount() : "null"));
 
         Map<String, Object> fields = new HashMap<>();
         fields.put("phoneNumbers", true);
@@ -423,10 +433,12 @@ public class ContactsX extends CordovaPlugin {
 
         try {
             JSONArray contacts = handleFindResult(c, new ContactsXFindOptions(new JSONObject(pickFields)));
+            LOG.d(LOG_TAG, "getContactById handleFindResult length=" + contacts.length());
             if (contacts.length() >= 1) {
                 return contacts.getJSONObject(0);
             }
         } catch (Exception e) {
+            LOG.e(LOG_TAG, "getContactById exception: " + e.getMessage(), e);
             returnError(ContactsXErrorCodes.UnknownError, e.getMessage());
         }
 
