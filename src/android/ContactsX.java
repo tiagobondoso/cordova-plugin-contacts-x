@@ -108,7 +108,8 @@ public class ContactsX extends CordovaPlugin {
                             return;
                         }
 
-                        // Resolve the CONTACT_ID directly from the URI.
+                        // Resolve the CONTACT_ID directly from the URI the picker gave us.
+                        // The system grants temporary read access to this URI even without READ_CONTACTS.
                         Cursor idCursor = this.cordova.getActivity().getContentResolver().query(
                                 contactUri,
                                 new String[]{ContactsContract.Contacts._ID},
@@ -124,24 +125,7 @@ public class ContactsX extends CordovaPlugin {
                         idCursor.close();
                         LOG.d(LOG_TAG, "pick resolved contactId=" + contactId);
 
-                        // Now get the first raw contact ID for that contact.
-                        Cursor rawCursor = this.cordova.getActivity().getContentResolver().query(
-                                ContactsContract.RawContacts.CONTENT_URI,
-                                new String[]{ContactsContract.RawContacts._ID},
-                                ContactsContract.RawContacts.CONTACT_ID + " = ?",
-                                new String[]{contactId}, null);
-
-                        if (rawCursor == null || !rawCursor.moveToFirst()) {
-                            if (rawCursor != null) rawCursor.close();
-                            returnError(ContactsXErrorCodes.UnknownError, "Error occurred while retrieving contact raw id");
-                            return;
-                        }
-
-                        String rawId = rawCursor.getString(rawCursor.getColumnIndexOrThrow(ContactsContract.RawContacts._ID));
-                        rawCursor.close();
-                        LOG.d(LOG_TAG, "pick resolved rawId=" + rawId);
-
-                        JSONObject contact = getContactById(rawId);
+                        JSONObject contact = buildContactFromId(contactId);
                         if (contact != null) {
                             LOG.d(LOG_TAG, "pick success contact=" + contact.toString());
                             this._callbackContext.success(contact);
@@ -443,6 +427,130 @@ public class ContactsX extends CordovaPlugin {
         }
 
         return null;
+    }
+
+    /**
+     * Builds a contact JSONObject from a CONTACT_ID, matching the iOS output structure exactly:
+     * { id, displayName, firstName, middleName, familyName, organizationName,
+     *   phoneNumbers: [{id, type, value, normalized}],
+     *   emails: [{id, type, value}] }
+     */
+    private JSONObject buildContactFromId(String contactId) throws JSONException {
+        ContentResolver cr = this.cordova.getActivity().getContentResolver();
+
+        JSONObject result = new JSONObject();
+        result.put("id", contactId);
+        result.put("phoneNumbers", new JSONArray());
+        result.put("emails", new JSONArray());
+
+        // 1. Fetch display name + structured name from Contacts table
+        Cursor nameCursor = cr.query(
+                ContactsContract.Contacts.CONTENT_URI,
+                new String[]{
+                        ContactsContract.Contacts.DISPLAY_NAME
+                },
+                ContactsContract.Contacts._ID + " = ?",
+                new String[]{contactId}, null);
+        if (nameCursor != null) {
+            if (nameCursor.moveToFirst()) {
+                int displayNameIdx = nameCursor.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME);
+                if (displayNameIdx >= 0) result.put("displayName", nameCursor.getString(displayNameIdx));
+            }
+            nameCursor.close();
+        }
+
+        // 2. Fetch structured name fields from Data table
+        Cursor structuredCursor = cr.query(
+                ContactsContract.Data.CONTENT_URI,
+                new String[]{
+                        ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME,
+                        ContactsContract.CommonDataKinds.StructuredName.MIDDLE_NAME,
+                        ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME
+                },
+                ContactsContract.Data.CONTACT_ID + " = ? AND " +
+                ContactsContract.Data.MIMETYPE + " = ?",
+                new String[]{contactId, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE},
+                null);
+        if (structuredCursor != null) {
+            if (structuredCursor.moveToFirst()) {
+                int givenIdx  = structuredCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME);
+                int middleIdx = structuredCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.MIDDLE_NAME);
+                int familyIdx = structuredCursor.getColumnIndex(ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME);
+                if (givenIdx  >= 0) result.put("firstName",  nullSafeString(structuredCursor, givenIdx));
+                if (middleIdx >= 0) result.put("middleName", nullSafeString(structuredCursor, middleIdx));
+                if (familyIdx >= 0) result.put("familyName", nullSafeString(structuredCursor, familyIdx));
+            }
+            structuredCursor.close();
+        }
+
+        // 3. Fetch organisation from Data table
+        Cursor orgCursor = cr.query(
+                ContactsContract.Data.CONTENT_URI,
+                new String[]{ContactsContract.CommonDataKinds.Organization.COMPANY},
+                ContactsContract.Data.CONTACT_ID + " = ? AND " +
+                ContactsContract.Data.MIMETYPE + " = ?",
+                new String[]{contactId, ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE},
+                null);
+        if (orgCursor != null) {
+            if (orgCursor.moveToFirst()) {
+                int orgIdx = orgCursor.getColumnIndex(ContactsContract.CommonDataKinds.Organization.COMPANY);
+                if (orgIdx >= 0) result.put("organizationName", nullSafeString(orgCursor, orgIdx));
+            }
+            orgCursor.close();
+        }
+
+        // 4. Fetch phone numbers from Data table
+        Cursor phoneCursor = cr.query(
+                ContactsContract.Data.CONTENT_URI,
+                new String[]{
+                        ContactsContract.CommonDataKinds.Phone._ID,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER,
+                        ContactsContract.CommonDataKinds.Phone.TYPE,
+                        ContactsContract.CommonDataKinds.Phone.LABEL
+                },
+                ContactsContract.Data.CONTACT_ID + " = ? AND " +
+                ContactsContract.Data.MIMETYPE + " = ?",
+                new String[]{contactId, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE},
+                null);
+        if (phoneCursor != null) {
+            JSONArray phones = new JSONArray();
+            ContactsXFindOptions emptyOptions = new ContactsXFindOptions(null);
+            while (phoneCursor.moveToNext()) {
+                phones.put(phoneQuery(phoneCursor, emptyOptions));
+            }
+            phoneCursor.close();
+            result.put("phoneNumbers", phones);
+        }
+
+        // 5. Fetch emails from Data table
+        Cursor emailCursor = cr.query(
+                ContactsContract.Data.CONTENT_URI,
+                new String[]{
+                        ContactsContract.CommonDataKinds.Email._ID,
+                        ContactsContract.CommonDataKinds.Email.DATA,
+                        ContactsContract.CommonDataKinds.Email.TYPE,
+                        ContactsContract.CommonDataKinds.Email.LABEL
+                },
+                ContactsContract.Data.CONTACT_ID + " = ? AND " +
+                ContactsContract.Data.MIMETYPE + " = ?",
+                new String[]{contactId, ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE},
+                null);
+        if (emailCursor != null) {
+            JSONArray emails = new JSONArray();
+            while (emailCursor.moveToNext()) {
+                emails.put(emailQuery(emailCursor));
+            }
+            emailCursor.close();
+            result.put("emails", emails);
+        }
+
+        LOG.d(LOG_TAG, "buildContactFromId result=" + result.toString());
+        return result;
+    }
+
+    private String nullSafeString(Cursor cursor, int columnIndex) {
+        String val = cursor.getString(columnIndex);
+        return val != null ? val : "";
     }
 
     private void save(JSONArray args) throws JSONException {
