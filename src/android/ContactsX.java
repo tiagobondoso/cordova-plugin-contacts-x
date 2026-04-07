@@ -48,6 +48,7 @@ public class ContactsX extends CordovaPlugin {
 
     public static final int REQ_CODE_PERMISSIONS = 0;
     public static final int REQ_CODE_PICK = 2;
+    public static final int REQ_CODE_PICK_PERMISSION = 3;
 
     private PhoneNumberUtil phoneUtil = PhoneNumberUtil.getInstance();
 
@@ -63,9 +64,14 @@ public class ContactsX extends CordovaPlugin {
                     returnError(ContactsXErrorCodes.PermissionDenied);
                 }
             } else if (action.equals("pick")) {
-                // ACTION_PICK uses the system contact picker UI which does NOT
-                // require READ_CONTACTS permission — present it directly.
-                this.pick();
+                // The system picker UI needs no permission to open, but reading
+                // the selected contact's data afterwards requires READ_CONTACTS.
+                // Request it now if not yet granted; the picker launches once granted.
+                if (PermissionHelper.hasPermission(this, READ)) {
+                    this.pick();
+                } else {
+                    PermissionHelper.requestPermission(this, REQ_CODE_PICK_PERMISSION, READ);
+                }
             } else if (action.equals("save")) {
                 if(PermissionHelper.hasPermission(this, WRITE)) {
                     this.save(args);
@@ -148,7 +154,17 @@ public class ContactsX extends CordovaPlugin {
 
     public void onRequestPermissionResult(int requestCode, String[] permissions,
                                           int[] grantResults) throws JSONException {
-        this.hasPermission();
+        if (requestCode == REQ_CODE_PICK_PERMISSION) {
+            if (grantResults.length > 0 &&
+                grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                // Permission just granted — now open the picker
+                this.pick();
+            } else {
+                returnError(ContactsXErrorCodes.PermissionDenied, "READ_CONTACTS permission denied");
+            }
+        } else {
+            this.hasPermission();
+        }
     }
 
     private void find(JSONArray args) throws JSONException {
@@ -398,9 +414,8 @@ public class ContactsX extends CordovaPlugin {
     }
 
     /**
-     * Builds a contact JSONObject using the URI returned by the system picker.
-     * The picker URI carries a temporary OS permission grant that covers reading
-     * this contact's data — no READ_CONTACTS permission needed.
+     * Builds a contact JSONObject from the CONTACT_ID returned by the system picker.
+     * READ_CONTACTS permission is guaranteed before this is called.
      * Output structure matches iOS exactly:
      * { id, displayName, firstName, middleName, familyName, organizationName,
      *   phoneNumbers: [{id, type, value, normalized}],
@@ -419,12 +434,10 @@ public class ContactsX extends CordovaPlugin {
         result.put("phoneNumbers", new JSONArray());
         result.put("emails", new JSONArray());
 
-        // 1. Read displayName directly from the picker URI (always permitted)
+        // 1. Display name — query the picker URI directly
         Cursor contactCursor = cr.query(
                 pickerUri,
-                new String[]{
-                        ContactsContract.Contacts.DISPLAY_NAME
-                },
+                new String[]{ ContactsContract.Contacts.DISPLAY_NAME },
                 null, null, null);
         if (contactCursor != null) {
             if (contactCursor.moveToFirst()) {
@@ -434,21 +447,17 @@ public class ContactsX extends CordovaPlugin {
             contactCursor.close();
         }
 
-        // Build the Data URI scoped to this specific contact using the lookup path.
-        // e.g. content://com.android.contacts/contacts/lookup/<key>/<id>/data
-        // This URI inherits the same temporary permission the picker granted.
-        Uri dataUri = Uri.withAppendedPath(pickerUri, ContactsContract.Contacts.Data.CONTENT_DIRECTORY);
-
-        // 2. Structured name
+        // 2. Structured name — requires READ_CONTACTS (now guaranteed)
         Cursor structuredCursor = cr.query(
-                dataUri,
+                ContactsContract.Data.CONTENT_URI,
                 new String[]{
                         ContactsContract.CommonDataKinds.StructuredName.GIVEN_NAME,
                         ContactsContract.CommonDataKinds.StructuredName.MIDDLE_NAME,
                         ContactsContract.CommonDataKinds.StructuredName.FAMILY_NAME
                 },
+                ContactsContract.Data.CONTACT_ID + " = ? AND " +
                 ContactsContract.Data.MIMETYPE + " = ?",
-                new String[]{ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE},
+                new String[]{ contactId, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE },
                 null);
         if (structuredCursor != null) {
             if (structuredCursor.moveToFirst()) {
@@ -464,10 +473,11 @@ public class ContactsX extends CordovaPlugin {
 
         // 3. Organisation
         Cursor orgCursor = cr.query(
-                dataUri,
-                new String[]{ContactsContract.CommonDataKinds.Organization.COMPANY},
+                ContactsContract.Data.CONTENT_URI,
+                new String[]{ ContactsContract.CommonDataKinds.Organization.COMPANY },
+                ContactsContract.Data.CONTACT_ID + " = ? AND " +
                 ContactsContract.Data.MIMETYPE + " = ?",
-                new String[]{ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE},
+                new String[]{ contactId, ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE },
                 null);
         if (orgCursor != null) {
             if (orgCursor.moveToFirst()) {
@@ -479,15 +489,16 @@ public class ContactsX extends CordovaPlugin {
 
         // 4. Phone numbers
         Cursor phoneCursor = cr.query(
-                dataUri,
+                ContactsContract.Data.CONTENT_URI,
                 new String[]{
                         ContactsContract.CommonDataKinds.Phone._ID,
                         ContactsContract.CommonDataKinds.Phone.NUMBER,
                         ContactsContract.CommonDataKinds.Phone.TYPE,
                         ContactsContract.CommonDataKinds.Phone.LABEL
                 },
+                ContactsContract.Data.CONTACT_ID + " = ? AND " +
                 ContactsContract.Data.MIMETYPE + " = ?",
-                new String[]{ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE},
+                new String[]{ contactId, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE },
                 null);
         if (phoneCursor != null) {
             JSONArray phones = new JSONArray();
@@ -501,15 +512,16 @@ public class ContactsX extends CordovaPlugin {
 
         // 5. Emails
         Cursor emailCursor = cr.query(
-                dataUri,
+                ContactsContract.Data.CONTENT_URI,
                 new String[]{
                         ContactsContract.CommonDataKinds.Email._ID,
                         ContactsContract.CommonDataKinds.Email.DATA,
                         ContactsContract.CommonDataKinds.Email.TYPE,
                         ContactsContract.CommonDataKinds.Email.LABEL
                 },
+                ContactsContract.Data.CONTACT_ID + " = ? AND " +
                 ContactsContract.Data.MIMETYPE + " = ?",
-                new String[]{ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE},
+                new String[]{ contactId, ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE },
                 null);
         if (emailCursor != null) {
             JSONArray emails = new JSONArray();
